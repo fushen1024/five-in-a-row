@@ -1,0 +1,19 @@
+name: pine_gomoku
+description: 松间五子棋，Android 与 iOS 蓝牙离线对弈。
+publish_to: none
+version: 1.0.0+1
+environment:
+  sdk: '>=3.10.0 <4.0.0'
+dependencies:
+  flutter:
+    sdk: flutter
+  universal_ble: 2.2.0
+  shared_preferences: ^2.5.3
+  image_picker: ^1.2.0
+  image: ^4.5.4
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+flutter:
+  uses-material-design: true
