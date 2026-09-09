@@ -11,7 +11,7 @@ void main() {
       profile: const Profile(),
       send: (_) async {},
     );
-    await host.receive({'v': 1, 'type': 'ack', 'round': ''});
+    await host.receive({'v': 2, 'type': 'ack', 'round': ''});
     expect(host.ready, false);
     expect(host.canPlay, false);
     host.dispose();
@@ -23,7 +23,7 @@ void main() {
       send: (_) async {},
     );
     await guest.receive({
-      'v': 1,
+      'v': 2,
       'type': 'state',
       'round': 'foreign',
       'moves': [
@@ -72,11 +72,13 @@ void main() {
       expect(host.ready, true);
       expect(guest.ready, true);
       expect(guest.remote?.name, '房主');
+      final black = host.myStone == 1 ? host : guest;
+      final white = host.myStone == 2 ? host : guest;
       for (var i = 0; i < 5; i++) {
-        await host.place(i, 7);
+        await black.place(i, 7);
         await settle();
         if (i < 4) {
-          await guest.place(i * 2, 0);
+          await white.place(i * 2, 0);
           await settle();
         }
       }
@@ -93,12 +95,12 @@ void main() {
       send: (_) async {},
     );
     await host.receive({
-      'v': 1,
+      'v': 2,
       'type': 'hello',
       'profile': const Profile().toJson(),
     });
     await host.receive({
-      'v': 1,
+      'v': 2,
       'type': 'move',
       'round': host.round,
       'seq': 0,

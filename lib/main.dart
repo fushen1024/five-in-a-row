@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:universal_ble/universal_ble.dart';
 import 'domain/game.dart';
 import 'domain/profile.dart';
+import 'domain/room.dart';
 import 'services/ble_link.dart';
 import 'session.dart';
 import 'ui/board.dart';
@@ -514,7 +516,7 @@ class _LobbyState extends State<Lobby> with WidgetsBindingObserver {
                     title: Text(
                       '松间房间 · ${entry.$1.deviceId.replaceAll('-', '').replaceAll(':', '').substring(0, 4)}',
                     ),
-                    subtitle: const Text('点击加入 · 房主执黑'),
+                    subtitle: const Text('点击加入 · 每局随机执黑'),
                     trailing: const Icon(Icons.chevron_right),
                     onTap: _busy ? null : () => play(device: entry.$1),
                   ),
@@ -564,17 +566,31 @@ class MatchPage extends StatefulWidget {
 }
 
 class _MatchPageState extends State<MatchPage> with WidgetsBindingObserver {
-  Game _local = Game();
+  final Room _local = Room(hostBlack: Random.secure().nextBool());
   GameSession? _session;
   BleLink? _link;
   bool _allowPop = false;
   bool _starting = true;
-  Game get game => widget.local ? _local : _session!.game;
+  Room get room => widget.local ? _local : _session!.room;
+  Game get game => room.game;
+  bool get canAct => widget.local ? room.proposal == null : _session!.canAct;
+  bool get currentActor => room.stoneFor(true) == game.turn;
+  bool requestActor(String kind) => widget.local
+      ? switch (kind) {
+          'swap' => !room.hostBlack,
+          _ => currentActor,
+        }
+      : _session!.host;
+  bool canRequest(String kind) =>
+      canAct &&
+      (widget.local && kind == 'undo'
+          ? room.canRequest(kind, true) || room.canRequest(kind, false)
+          : room.canRequest(kind, requestActor(kind)));
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    if (widget.initialLink != null && widget.initialSession != null) {
+    if (widget.initialSession != null) {
       _link = widget.initialLink;
       _session = widget.initialSession;
       _session!.addListener(refresh);
@@ -616,11 +632,113 @@ class _MatchPageState extends State<MatchPage> with WidgetsBindingObserver {
 
   Future<void> place(int x, int y) async {
     if (widget.local) {
-      setState(() => _local.place(x, y, _local.turn));
+      setState(() => _local.apply('move', currentActor, {'x': x, 'y': y}));
     } else {
       await _session!.place(x, y);
     }
     unawaited(HapticFeedback.selectionClick());
+  }
+
+  String requestName(String kind) => switch (kind) {
+    'undo' => '悔棋',
+    'swap' => '换色',
+    _ => '再来一局',
+  };
+
+  Future<void> request(String kind) async {
+    if (!canRequest(kind)) return;
+    if (!widget.local) {
+      await _session!.request(kind);
+      return;
+    }
+    var actor = requestActor(kind);
+    if (kind == 'undo') {
+      final selected = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('哪一方申请悔棋？'),
+          content: const Text('选择申请方，再交给对方同意。棋盘将退至申请方上次落子前。'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('取消'),
+            ),
+            for (final stone in [1, 2])
+              OutlinedButton(
+                onPressed: room.canRequest('undo', room.stoneFor(true) == stone)
+                    ? () => Navigator.pop(context, room.stoneFor(true) == stone)
+                    : null,
+                child: Text('${stone == 1 ? '黑' : '白'}方申请'),
+              ),
+          ],
+        ),
+      );
+      if (!mounted || selected == null) return;
+      actor = selected;
+    }
+    setState(() => room.apply('request', actor, {'kind': kind}));
+    final accepted = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: Text(
+          '${kind == 'rematch' ? '' : '${room.stoneFor(actor) == 1 ? '黑' : '白'}方'}${requestName(kind)}申请',
+        ),
+        content: Text(switch (kind) {
+          'swap' => '请将设备交给对方确认。双方同意后交换黑白。',
+          'undo' => '请将设备交给对方确认。双方同意后退至申请人上次落子前。',
+          _ => '请双方确认是否再来一局。比分保留，新一局随机执黑。',
+        }),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('拒绝'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('同意'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    setState(
+      () => room.apply('respond', !actor, {
+        'accept': accepted == true,
+        if (kind == 'rematch' && accepted == true)
+          'hostBlack': Random.secure().nextBool(),
+      }),
+    );
+  }
+
+  Future<void> resign() async {
+    if (!canAct || room.proposal != null || game.finished) return;
+    final actor = widget.local ? currentActor : _session!.host;
+    final yes = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('确认认输？'),
+        content: Text(
+          '${room.stoneFor(actor) == 1 ? '黑' : '白'}方认输后，本局结束，对方获得 1 分。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('继续下棋'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('确认认输'),
+          ),
+        ],
+      ),
+    );
+    if (yes != true || !mounted) return;
+    if (widget.local) {
+      setState(() => room.apply('resign', actor, {}));
+    } else {
+      await _session!.resign();
+    }
   }
 
   Future<void> leave() async {
@@ -660,7 +778,7 @@ class _MatchPageState extends State<MatchPage> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused && !widget.local) {
       _session?.fail('游戏已进入后台，对局暂停。请返回大厅重新连接');
-      unawaited(_link!.close());
+      if (_link != null) unawaited(_link!.close());
     }
   }
 
@@ -681,12 +799,13 @@ class _MatchPageState extends State<MatchPage> with WidgetsBindingObserver {
     if (!widget.local && !_session!.ready) {
       return widget.device == null ? '房间已开启，等待棋友' : '正在连接，交换玩家资料…';
     }
+    if (_session?.pending == true) return '正在同步操作…';
+    if (room.proposal != null) return '正在协商${requestName(room.proposal!.kind)}';
     if (game.finished) {
       return game.winner == 0
           ? '棋逢对手，本局和棋'
-          : '${game.winner == 1 ? '黑' : '白'}方获胜';
+          : '${room.resigned ? '${game.winner == 1 ? '白' : '黑'}方认输，' : ''}${game.winner == 1 ? '黑' : '白'}方获胜';
     }
-    if (_session?.pending == true) return '正在同步棋盘…';
     if (game.moves.isEmpty) return '黑方先行';
     return '轮到${game.turn == 1 ? '黑' : '白'}方落子';
   }
@@ -694,11 +813,15 @@ class _MatchPageState extends State<MatchPage> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     final remote = _session?.remote ?? const Profile(name: '等待棋友', avatar: 1);
-    final black = widget.local || _session!.host ? widget.profile : remote;
-    final white = widget.local
+    final host = widget.local || _session!.host ? widget.profile : remote;
+    final guest = widget.local
         ? const Profile(name: '同机棋友', avatar: 1)
         : (_session!.host ? remote : widget.profile);
-    final enabled = widget.local ? !game.finished : _session!.canPlay;
+    final black = room.hostBlack ? host : guest;
+    final white = room.hostBlack ? guest : host;
+    final enabled = widget.local
+        ? !game.finished && room.proposal == null
+        : _session!.canPlay;
     return PopScope(
       canPop: _allowPop,
       onPopInvokedWithResult: (didPop, result) {
@@ -733,9 +856,24 @@ class _MatchPageState extends State<MatchPage> with WidgetsBindingObserver {
                   vertical: 14,
                 ),
                 children: [
+                  Text(
+                    '第 ${room.roundNumber} 局',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: pine,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
                   Row(
                     children: [
-                      Expanded(child: player(black, 1)),
+                      Expanded(
+                        child: player(
+                          black,
+                          1,
+                          room.hostBlack ? room.hostScore : room.guestScore,
+                        ),
+                      ),
                       const Padding(
                         padding: EdgeInsets.symmetric(horizontal: 14),
                         child: Text(
@@ -746,7 +884,13 @@ class _MatchPageState extends State<MatchPage> with WidgetsBindingObserver {
                           ),
                         ),
                       ),
-                      Expanded(child: player(white, 2)),
+                      Expanded(
+                        child: player(
+                          white,
+                          2,
+                          room.hostBlack ? room.guestScore : room.hostScore,
+                        ),
+                      ),
                     ],
                   ),
                   const SizedBox(height: 26),
@@ -766,17 +910,47 @@ class _MatchPageState extends State<MatchPage> with WidgetsBindingObserver {
                   Text(
                     widget.local
                         ? '两人共用一台设备，轮流落子'
+                        : !_session!.ready
+                        ? '连接后随机分配黑白 · 蓝牙直连'
                         : '你执${_session!.myStone == 1 ? '黑' : '白'} · 无需网络，蓝牙直连',
                     textAlign: TextAlign.center,
                     style: const TextStyle(fontSize: 12, color: Colors.grey),
                   ),
                   const SizedBox(height: 24),
+                  if (!widget.local && room.proposal != null) proposalCard(),
                   Board(
                     game: game,
                     enabled: enabled,
                     onPlace: (x, y) => unawaited(place(x, y)),
                   ),
                   const SizedBox(height: 20),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    alignment: WrapAlignment.center,
+                    children: [
+                      OutlinedButton(
+                        onPressed: canRequest('undo')
+                            ? () => request('undo')
+                            : null,
+                        child: const Text('申请悔棋'),
+                      ),
+                      OutlinedButton(
+                        onPressed: canRequest('swap')
+                            ? () => request('swap')
+                            : null,
+                        child: const Text('申请换色'),
+                      ),
+                      OutlinedButton(
+                        onPressed:
+                            canAct && room.proposal == null && !game.finished
+                            ? resign
+                            : null,
+                        child: const Text('认输'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
@@ -837,17 +1011,17 @@ class _MatchPageState extends State<MatchPage> with WidgetsBindingObserver {
                           ),
                           const SizedBox(height: 16),
                           FilledButton(
-                            onPressed: widget.local
-                                ? () => setState(() => _local = Game())
-                                : leave,
-                            child: Text(widget.local ? '再来一局' : '返回大厅，再约一局'),
+                            onPressed: canRequest('rematch')
+                                ? () => request('rematch')
+                                : null,
+                            child: const Text('再来一局'),
                           ),
                         ],
                       ),
                     ),
                   const SizedBox(height: 20),
                   const Text(
-                    '落子无悔，享受此刻。',
+                    '友好协商，享受此刻。',
                     textAlign: TextAlign.center,
                     style: TextStyle(fontSize: 12, color: Color(0xFFA1A694)),
                   ),
@@ -860,7 +1034,55 @@ class _MatchPageState extends State<MatchPage> with WidgetsBindingObserver {
     );
   }
 
-  Widget player(Profile profile, int stone) => Container(
+  Widget proposalCard() {
+    final proposal = room.proposal!;
+    final mine = proposal.byHost == _session!.host;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 18),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFFE7EDDF),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        children: [
+          Text(
+            mine
+                ? '已申请${requestName(proposal.kind)}，等待对方同意'
+                : '对方申请${requestName(proposal.kind)}',
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 6),
+          Text(switch (proposal.kind) {
+            'undo' => '同意后退至申请人上次落子前。',
+            'swap' => '同意后交换黑白，比分仍属于原玩家。',
+            _ => '同意后保留比分，再开一局，随机执黑。',
+          }, textAlign: TextAlign.center),
+          if (!mine)
+            Wrap(
+              spacing: 12,
+              children: [
+                TextButton(
+                  onPressed: _session!.canAct
+                      ? () => _session!.respond(false)
+                      : null,
+                  child: const Text('拒绝'),
+                ),
+                FilledButton(
+                  onPressed: _session!.canAct
+                      ? () => _session!.respond(true)
+                      : null,
+                  child: const Text('同意'),
+                ),
+              ],
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget player(Profile profile, int stone, double score) => Container(
     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 16),
     decoration: BoxDecoration(
       color: Colors.white,
@@ -885,6 +1107,11 @@ class _MatchPageState extends State<MatchPage> with WidgetsBindingObserver {
         Text(
           stone == 1 ? '● 黑方' : '○ 白方',
           style: const TextStyle(fontSize: 12, color: Colors.grey),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          '${score == score.truncateToDouble() ? score.toInt() : score} 分',
+          style: const TextStyle(color: pine, fontWeight: FontWeight.w600),
         ),
       ],
     ),

@@ -3,6 +3,7 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'domain/game.dart';
 import 'domain/profile.dart';
+import 'domain/room.dart';
 
 typedef SendMessage = Future<void> Function(Map<String, dynamic> message);
 
@@ -11,23 +12,22 @@ class GameSession extends ChangeNotifier {
   final Profile profile;
   final SendMessage send;
   Profile? remote;
-  Game game = Game();
+  Room room = Room(hostBlack: true);
+  Game get game => room.game;
   String round = '';
   String? error;
   bool ready = false, pending = false;
   bool _disposed = false;
+  int _revision = 0;
   int? _awaitingAck;
-  Timer? _heartbeat, _deadline;
+  Timer? _heartbeat, _deadline, _proposalTimer;
   DateTime _lastSeen = DateTime.now();
   Future<void> _inbox = Future.value();
   GameSession({required this.host, required this.profile, required this.send});
-  int get myStone => host ? 1 : 2;
+  int get myStone => room.stoneFor(host);
+  bool get canAct => ready && error == null && !pending && !_disposed;
   bool get canPlay =>
-      ready &&
-      error == null &&
-      !pending &&
-      !game.finished &&
-      game.turn == myStone;
+      canAct && room.proposal == null && !game.finished && game.turn == myStone;
 
   void changed() {
     if (!_disposed) notifyListeners();
@@ -36,7 +36,7 @@ class GameSession extends ChangeNotifier {
   Future<void> emit(String type, [Map<String, dynamic> data = const {}]) async {
     if (_disposed || error != null) return;
     try {
-      await send({'v': 1, 'type': type, ...data});
+      await send({'v': 2, 'type': type, ...data});
     } catch (_) {
       fail('消息发送失败，请返回大厅重新连接');
     }
@@ -66,17 +66,14 @@ class GameSession extends ChangeNotifier {
     await emit('hello', {'profile': profile.toJson()});
   }
 
-  Future<void> snapshot({bool welcome = false}) async {
+  void _waitAck() {
     pending = true;
-    _awaitingAck = game.moves.length;
+    _awaitingAck = _revision;
     deadline();
     changed();
-    await emit('state', {
-      'round': round,
-      'moves': game.toJson(),
-      if (welcome) 'profile': profile.toJson(),
-    });
   }
+
+  Future<void> _ack() => emit('ack', {'round': round, 'rev': _revision});
 
   Future<void> receive(Map<String, dynamic> message) {
     _inbox = _inbox.then((_) => _receive(message));
@@ -86,7 +83,7 @@ class GameSession extends ChangeNotifier {
   Future<void> _receive(Map<String, dynamic> m) async {
     if (_disposed || error != null) return;
     try {
-      if (m['v'] != 1) throw const FormatException('游戏版本不兼容');
+      if (m['v'] != 2) throw const FormatException('双方均需升级到 2.0');
       _lastSeen = DateTime.now();
       switch (m['type']) {
         case 'hello':
@@ -94,41 +91,34 @@ class GameSession extends ChangeNotifier {
           remote = Profile.fromJson(m['profile']);
           round =
               '${DateTime.now().microsecondsSinceEpoch}-${Random.secure().nextInt(1 << 30)}';
-          await snapshot(welcome: true);
-        case 'state':
-          if (host || m['round'] is! String || (m['round'] as String).isEmpty) {
-            throw const FormatException('无效对局状态');
+          room = Room(hostBlack: Random.secure().nextBool());
+          _waitAck();
+          await emit('welcome', {
+            'round': round,
+            'hostBlack': room.hostBlack,
+            'profile': profile.toJson(),
+          });
+        case 'welcome':
+          if (host ||
+              remote != null ||
+              m['round'] is! String ||
+              (m['round'] as String).isEmpty ||
+              m['hostBlack'] is! bool) {
+            throw const FormatException('无效开局');
           }
-          if (round.isNotEmpty && m['round'] != round) {
-            throw const FormatException('局号不符');
-          }
-          final next = Game.fromMoves(m['moves']);
-          if (remote == null && next.moves.isNotEmpty) {
-            throw const FormatException('开局棋盘不为空');
-          }
-          if (next.moves.length < game.moves.length ||
-              next.moves.length > game.moves.length + 1) {
-            throw const FormatException('步号不连续');
-          }
-          for (var i = 0; i < game.moves.length; i++) {
-            if (game.moves[i] != next.moves[i]) {
-              throw const FormatException('棋谱不一致');
-            }
-          }
-          remote ??= Profile.fromJson(m['profile']);
+          remote = Profile.fromJson(m['profile']);
           round = m['round'];
-          game = next;
-          pending = false;
+          room = Room(hostBlack: m['hostBlack']);
           ready = true;
           _deadline?.cancel();
           startHeartbeat();
-          await emit('ack', {'round': round, 'seq': game.moves.length});
+          await _ack();
         case 'ack':
           if (!host ||
               remote == null ||
               _awaitingAck == null ||
               m['round'] != round ||
-              m['seq'] != _awaitingAck) {
+              m['rev'] != _awaitingAck) {
             return;
           }
           _awaitingAck = null;
@@ -136,19 +126,43 @@ class GameSession extends ChangeNotifier {
           ready = true;
           _deadline?.cancel();
           startHeartbeat();
-        case 'move':
-          if (!host ||
-              !ready ||
-              pending ||
-              m['round'] != round ||
-              m['seq'] != game.moves.length ||
-              m['x'] is! int ||
-              m['y'] is! int ||
-              game.turn != 2) {
+          _scheduleProposalExpiry();
+        case 'command':
+          if (!host || remote == null || m['round'] != round) return;
+          if (!canAct ||
+              m['rev'] != _revision ||
+              m['action'] is! String ||
+              m['data'] is! Map<String, dynamic>) {
+            await emit('rejected', {'round': round, 'rev': _revision});
             return;
           }
-          game.place(m['x'], m['y'], 2);
-          await snapshot();
+          if (!await _commit(m['action'], false, m['data'])) {
+            await emit('rejected', {'round': round, 'rev': _revision});
+          }
+        case 'event':
+          if (host || !ready || m['round'] != round || m['rev'] is! int) {
+            throw const FormatException('无效同步');
+          }
+          if (m['rev'] <= _revision) {
+            await _ack();
+            return;
+          }
+          if (m['rev'] != _revision + 1 ||
+              m['actor'] is! bool ||
+              m['action'] is! String ||
+              m['data'] is! Map<String, dynamic> ||
+              !room.apply(m['action'], m['actor'], m['data'])) {
+            throw const FormatException('操作序列不一致');
+          }
+          _revision = m['rev'];
+          pending = false;
+          _deadline?.cancel();
+          await _ack();
+        case 'rejected':
+          if (!host && m['round'] == round && m['rev'] == _revision) {
+            pending = false;
+            _deadline?.cancel();
+          }
         case 'ping':
           if (remote != null) await emit('pong');
         case 'pong':
@@ -156,37 +170,94 @@ class GameSession extends ChangeNotifier {
         case 'leave':
           fail('对方已离开，请返回大厅重新建房');
         default:
-          throw const FormatException('未知消息类型');
+          throw const FormatException('未知消息');
       }
       changed();
     } catch (_) {
-      fail('对局数据异常或版本不兼容，请重新连接');
+      fail('对局数据异常或版本不兼容，请确认双方均已升级到 2.0 后重新连接');
+    }
+  }
+
+  Future<bool> _commit(
+    String action,
+    bool actor,
+    Map<String, dynamic> data,
+  ) async {
+    final approved = Map<String, dynamic>.from(data);
+    // Only the host chooses randomness, never a peer-provided random result.
+    if (action == 'respond' &&
+        room.proposal?.kind == 'rematch' &&
+        approved['accept'] == true) {
+      approved['hostBlack'] = Random.secure().nextBool();
+    }
+    if (!room.apply(action, actor, approved)) return false;
+    _proposalTimer?.cancel();
+    _revision++;
+    _waitAck();
+    await emit('event', {
+      'round': round,
+      'rev': _revision,
+      'action': action,
+      'actor': actor,
+      'data': approved,
+    });
+    return true;
+  }
+
+  void _scheduleProposalExpiry() {
+    _proposalTimer?.cancel();
+    final proposal = room.proposal;
+    if (!host || proposal == null) return;
+    _proposalTimer = Timer(const Duration(seconds: 30), () {
+      if (canAct && identical(room.proposal, proposal)) {
+        // Timeout may only decline, never grant consent on behalf of a player.
+        unawaited(_commit('respond', !proposal.byHost, {'accept': false}));
+      }
+    });
+  }
+
+  Future<void> _command(String action, Map<String, dynamic> data) async {
+    if (!canAct) return;
+    if (host) {
+      await _commit(action, true, data);
+    } else {
+      pending = true;
+      deadline();
+      changed();
+      await emit('command', {
+        'round': round,
+        'rev': _revision,
+        'action': action,
+        'data': data,
+      });
     }
   }
 
   Future<void> place(int x, int y) async {
-    if (!canPlay) return;
-    if (x < 0 ||
+    if (!canPlay ||
+        x < 0 ||
         y < 0 ||
         x >= Game.size ||
         y >= Game.size ||
         game.at(x, y) != 0) {
       return;
     }
-    if (host) {
-      game.place(x, y, 1);
-      await snapshot();
-    } else {
-      pending = true;
-      deadline();
-      changed();
-      await emit('move', {
-        'round': round,
-        'seq': game.moves.length,
-        'x': x,
-        'y': y,
-      });
-    }
+    await _command('move', {'x': x, 'y': y});
+  }
+
+  Future<void> request(String kind) async {
+    if (!room.canRequest(kind, host)) return;
+    await _command('request', {'kind': kind});
+  }
+
+  Future<void> respond(bool accept) async {
+    if (room.proposal == null || room.proposal!.byHost == host) return;
+    await _command('respond', {'accept': accept});
+  }
+
+  Future<void> resign() async {
+    if (game.finished || room.proposal != null) return;
+    await _command('resign', {});
   }
 
   void fail(String reason) {
@@ -196,6 +267,7 @@ class GameSession extends ChangeNotifier {
     pending = false;
     _heartbeat?.cancel();
     _deadline?.cancel();
+    _proposalTimer?.cancel();
     changed();
   }
 
@@ -204,6 +276,7 @@ class GameSession extends ChangeNotifier {
     _disposed = true;
     _heartbeat?.cancel();
     _deadline?.cancel();
+    _proposalTimer?.cancel();
     super.dispose();
   }
 }
