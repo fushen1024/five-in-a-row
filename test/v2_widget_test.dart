@@ -161,9 +161,29 @@ void main() {
     expect(find.text('1 分'), findsOneWidget);
     await tap(tester, '再来一局');
     await tap(tester, '同意');
+    await tester.drag(find.byType(ListView), const Offset(0, 1200));
+    await tester.pumpAndSettle();
     expect(find.text('第 2 局'), findsOneWidget);
     expect(find.text('1 分'), findsOneWidget);
     expect(tester.widget<Board>(find.byType(Board)).game.finished, isFalse);
     expect(tester.takeException(), isNull);
+  });
+  testWidgets('draw can be rejected then agreed and rematched', (tester) async {
+    await open(tester);
+    await tap(tester, '申请和棋');
+    expect(find.textContaining('双方各得 0.5 分'), findsOneWidget);
+    await tap(tester, '拒绝');
+    expect(tester.widget<Board>(find.byType(Board)).game.finished, false);
+    await tap(tester, '申请和棋');
+    await tap(tester, '同意');
+    expect(tester.widget<Board>(find.byType(Board)).game.finished, true);
+    expect(tester.widget<Board>(find.byType(Board)).game.winner, 0);
+    await tester.drag(find.byType(ListView), const Offset(0, 1200));
+    await tester.pumpAndSettle();
+    expect(find.text('0.5 分'), findsNWidgets(2));
+    await tester.scrollUntilVisible(find.text('再来一局'), 200);
+    await tap(tester, '再来一局');
+    await tap(tester, '同意');
+    expect(tester.widget<Board>(find.byType(Board)).game.finished, false);
   });
 }

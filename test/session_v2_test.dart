@@ -224,4 +224,22 @@ void main() {
     expect(h.ready, false);
     expect(h.error, isNotNull);
   });
+
+  test('draw consent synchronizes a half point without a winner', () async {
+    final (h, g) = await pair();
+    final white = h.myStone == 2 ? h : g;
+    final black = h.myStone == 1 ? h : g;
+    await black.place(7, 7);
+    await settle();
+    await white.request('draw');
+    await settle();
+    expect(h.game.finished, false);
+    await black.respond(true);
+    await settle();
+    expect(h.game.finished, true);
+    expect(g.game.finished, true);
+    expect(h.game.winner, 0);
+    expect(h.room.hostScore, .5);
+    expect(g.room.guestScore, .5);
+  });
 }

@@ -112,4 +112,19 @@ void main() {
     expect(r.apply('move', true, {'x': -1, 'y': 0}), false);
     expect(r.game.moves, isEmpty);
   });
+
+  test('draw request needs consent and awards half point to both players', () {
+    final r = Room(hostBlack: true);
+    r.apply('move', true, {'x': 7, 'y': 7});
+    expect(r.apply('request', false, {'kind': 'draw'}), true);
+    expect(r.apply('move', true, {'x': 8, 'y': 7}), false);
+    expect(r.apply('respond', true, {'accept': false}), true);
+    expect(r.game.finished, false);
+    r.apply('request', false, {'kind': 'draw'});
+    expect(r.apply('respond', true, {'accept': true}), true);
+    expect(r.game.finished, true);
+    expect(r.game.winner, 0);
+    expect(r.hostScore, .5);
+    expect(r.guestScore, .5);
+  });
 }

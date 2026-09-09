@@ -63,7 +63,7 @@ class GameSession extends ChangeNotifier {
 
   Future<void> hello() async {
     deadline();
-    await emit('hello', {'profile': profile.toJson()});
+    await emit('hello', {'profile': profile.toJson(), 'draw': true});
   }
 
   void _waitAck() {
@@ -87,6 +87,7 @@ class GameSession extends ChangeNotifier {
       _lastSeen = DateTime.now();
       switch (m['type']) {
         case 'hello':
+          if (m['draw'] != true) throw const FormatException('请升级至 2.0.1');
           if (!host || remote != null) throw const FormatException('重复握手');
           remote = Profile.fromJson(m['profile']);
           round =
@@ -97,8 +98,10 @@ class GameSession extends ChangeNotifier {
             'round': round,
             'hostBlack': room.hostBlack,
             'profile': profile.toJson(),
+            'draw': true,
           });
         case 'welcome':
+          if (m['draw'] != true) throw const FormatException('请升级至 2.0.1');
           if (host ||
               remote != null ||
               m['round'] is! String ||
@@ -174,7 +177,7 @@ class GameSession extends ChangeNotifier {
       }
       changed();
     } catch (_) {
-      fail('对局数据异常或版本不兼容，请确认双方均已升级到 2.0 后重新连接');
+      fail('对局数据异常或版本不兼容，请确认双方均已升级到 2.0.1 后重新连接');
     }
   }
 

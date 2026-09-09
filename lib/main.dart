@@ -642,6 +642,7 @@ class _MatchPageState extends State<MatchPage> with WidgetsBindingObserver {
   String requestName(String kind) => switch (kind) {
     'undo' => '悔棋',
     'swap' => '换色',
+    'draw' => '和棋',
     _ => '再来一局',
   };
 
@@ -687,6 +688,7 @@ class _MatchPageState extends State<MatchPage> with WidgetsBindingObserver {
         content: Text(switch (kind) {
           'swap' => '请将设备交给对方确认。双方同意后交换黑白。',
           'undo' => '请将设备交给对方确认。双方同意后退至申请人上次落子前。',
+          'draw' => '请将设备交给对方确认。双方同意后本局和棋，双方各得 0.5 分。',
           _ => '请双方确认是否再来一局。比分保留，新一局随机执黑。',
         }),
         actions: [
@@ -942,6 +944,12 @@ class _MatchPageState extends State<MatchPage> with WidgetsBindingObserver {
                         child: const Text('申请换色'),
                       ),
                       OutlinedButton(
+                        onPressed: canRequest('draw')
+                            ? () => request('draw')
+                            : null,
+                        child: const Text('申请和棋'),
+                      ),
+                      OutlinedButton(
                         onPressed:
                             canAct && room.proposal == null && !game.finished
                             ? resign
@@ -952,13 +960,15 @@ class _MatchPageState extends State<MatchPage> with WidgetsBindingObserver {
                   ),
                   const SizedBox(height: 16),
                   Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      const Text(
-                        '自由规则 · 连成五子即胜',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Color(0xFF7F8778),
+                      const Expanded(
+                        child: Text(
+                          '自由规则 · 连成五子即胜 · 和棋需双方同意',
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Color(0xFF7F8778),
+                          ),
                         ),
                       ),
                       Text(
@@ -1057,6 +1067,7 @@ class _MatchPageState extends State<MatchPage> with WidgetsBindingObserver {
           Text(switch (proposal.kind) {
             'undo' => '同意后退至申请人上次落子前。',
             'swap' => '同意后交换黑白，比分仍属于原玩家。',
+            'draw' => '同意后本局和棋，双方各得 0.5 分。',
             _ => '同意后保留比分，再开一局，随机执黑。',
           }, textAlign: TextAlign.center),
           if (!mine)

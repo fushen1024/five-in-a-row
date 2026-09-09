@@ -5,9 +5,14 @@ class Game {
   List<(int, int)> get moves => List.unmodifiable(_moves);
   List<(int, int)> winningCells = [];
   int winner = 0;
+  bool draw = false;
   int get turn => _moves.length.isEven ? 1 : 2;
-  bool get finished => winner != 0 || _moves.length == size * size;
+  bool get finished => winner != 0 || draw || _moves.length == size * size;
   int at(int x, int y) => _board[y * size + x];
+
+  void finishDraw() {
+    if (!finished) draw = true;
+  }
 
   void place(int x, int y, int stone) {
     if (finished ||

@@ -25,6 +25,7 @@ class Room {
       'undo' => !game.finished && _undoIndex(actor) >= 0,
       'swap' => !game.finished && !_openingClosed && stoneFor(actor) == 2,
       'rematch' => game.finished,
+      'draw' => !game.finished,
       _ => false,
     };
   }
@@ -63,6 +64,9 @@ class Room {
               resigned = false;
               _openingClosed = false;
               roundNumber++;
+            case 'draw':
+              game.finishDraw();
+              _score();
           }
         }
         proposal = null;
